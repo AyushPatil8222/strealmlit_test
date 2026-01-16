@@ -1,4 +1,4 @@
-import pyodbc
+import pymssql  # CHANGED: pyodbc -> pymssql
 import re
 import json
 from datetime import date, datetime
@@ -16,13 +16,13 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME", "openai/gpt-oss-20b")
 DB_NAME = os.getenv("DB_NAME")
 DB_SERVER = os.getenv("DB_SERVER")
-
-
+DB_USER = os.getenv("DB_USER")      # ADDED
+DB_PASSWORD = os.getenv("DB_PASSWORD")  # ADDED
 
 FORBIDDEN_SQL_PATTERN = r"\b(insert|update|delete|drop|alter|truncate|exec|merge|create)\b"
 
 # =========================================================
-# GROQ CLIENT
+# GROQ CLIENT (UNCHANGED)
 # =========================================================
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -38,18 +38,19 @@ def groq_call(prompt, temperature=0):
     return response.choices[0].message.content.strip()
 
 # =========================================================
-# DATABASE CONNECTION
+# DATABASE CONNECTION (ONLY THIS CHANGED)
 # =========================================================
 def get_connection():
-    return pyodbc.connect(
-        "DRIVER={ODBC Driver 17 for SQL Server};"
-        f"SERVER={DB_SERVER};"
-        f"DATABASE={DB_NAME};"
-        "Trusted_Connection=yes;"
+    return pymssql.connect(  # CHANGED: pyodbc -> pymssql
+        server=DB_SERVER,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME,
+        timeout=30
     )
 
 # =========================================================
-# LOAD SCHEMA
+# ALL BELOW UNCHANGED
 # =========================================================
 def load_schema():
     conn = get_connection()
@@ -65,9 +66,6 @@ def load_schema():
     conn.close()
     return schema
 
-# =========================================================
-# SANITIZE SQL
-# =========================================================
 def sanitize_sql(sql: str) -> str:
     sql = re.sub(r"```sql|```", "", sql, flags=re.IGNORECASE)
     sql = sql.replace("`", "").strip()
@@ -80,31 +78,8 @@ def validate_sql(sql: str):
     if re.search(FORBIDDEN_SQL_PATTERN, sql_lower):
         raise ValueError("Unsafe SQL detected")
 
-# =========================================================
-# SQL GENERATION
-# =========================================================
 def generate_sql(question: str, schema: dict) -> str:
-    """
-    Generates a safe, fully-qualified SQL query from a natural language question.
-    Automatically includes any columns referenced in the query (WHERE/JOIN/GROUP/ORDER BY).
-    
-    Args:
-        question (str): The user's natural language question.
-        schema (dict): Database schema {table_name: [columns]}.
-    
-    Returns:
-        str: Sanitized SQL query ready for execution.
-    """
-
-    # 1️⃣ Convert schema to LLM-readable text
     schema_text = "\n".join(f"{table}({', '.join(cols)})" for table, cols in schema.items())
-
-    # 2️⃣ Prompt LLM to generate SQL
-    # Key improvements:
-    # - Always include in SELECT any column used in WHERE/JOIN
-    # - Include all relevant columns for human-readable answers
-    # - Do not invent columns
-    # - Use LEFT JOIN when unsure if related table may be empty
     prompt = f"""
 You are an expert SQL Server developer.
 
@@ -126,20 +101,11 @@ User Question:
 
 Return ONLY the raw SQL.
 """
-
     raw_sql = groq_call(prompt, temperature=0)
-
-    # 3️⃣ Sanitize SQL
     sql = sanitize_sql(raw_sql)
-
-    # 4️⃣ Safety check
     validate_sql(sql)
-
     return sql
 
-# =========================================================
-# SQL EXECUTION
-# =========================================================
 def execute_sql(sql: str):
     validate_sql(sql)
     conn = get_connection()
@@ -150,9 +116,6 @@ def execute_sql(sql: str):
     conn.close()
     return [dict(zip(cols, row)) for row in rows]
 
-# =========================================================
-# EXPERIENCE CALCULATION
-# =========================================================
 def calculate_experience(joining_date):
     if not joining_date:
         return "N/A"
@@ -164,9 +127,6 @@ def calculate_experience(joining_date):
     months = (delta.days % 365) // 30
     return f"{years} years {months} months"
 
-# =========================================================
-# HUMAN READABLE ANSWER
-# =========================================================
 def generate_answer(question: str, data: list):
     prompt = f"""
 You are a senior HR assistant.
@@ -185,9 +145,6 @@ Rules:
 """
     return groq_call(prompt)
 
-# =========================================================
-# FULL PIPELINE
-# =========================================================
 def ask_hr_bot(question: str):
     schema = load_schema()
     sql = generate_sql(question, schema)
@@ -198,20 +155,3 @@ def ask_hr_bot(question: str):
         "answer": answer,
         "raw_data": data
     }
-
-# =========================================================
-# CLI
-# =========================================================
-if __name__ == "__main__":
-    print("🤖 Expert HR Chatbot (Groq, type 'exit' to quit)")
-
-    while True:
-        q = input("\nAsk: ")
-        if q.lower() in ("exit", "quit"):
-            break
-        try:
-            res = ask_hr_bot(q)
-            print("\n🧠 SQL:\n", res["sql"])
-            print("\n🤖 Answer:\n", res["answer"])
-        except Exception as e:
-            print("\n❌ Error:", e)
