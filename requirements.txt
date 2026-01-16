@@ -1,0 +1,4 @@
+chainlit
+groq
+python-dotenv
+pyodbc
